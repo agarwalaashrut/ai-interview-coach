@@ -2,6 +2,12 @@
  * ChatSession Durable Object
  * Manages conversational memory and AI response generation per session
  */
+import { INTERVIEW_COACH_CONTEXT } from "./context";
+
+export interface Env {
+  GEMINI_API_KEY: string;
+}
+
 
 interface Message {
   role: "user" | "assistant";
@@ -97,83 +103,49 @@ export class ChatSession implements DurableObject {
    * Call Google Gemini API with full conversation history
    */
   private async callGeminiAPI(history: Message[]): Promise<string> {
-    const apiKey = this.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY environment variable is not set");
-    }
-
-    // Format history for Gemini API
-    const contents = history.map((msg) => ({
-      role: msg.role === "user" ? "user" : "model",
-      parts: [{ text: msg.content }],
-    }));
-
-    const requestBody = {
-      contents,
-    };
-
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        body: JSON.stringify(requestBody),
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
-    }
-
-    // Parse response defensively
-    let responseData: unknown;
-    try {
-      const text = await response.text();
-      responseData = JSON.parse(text);
-    } catch (error) {
-      throw new Error("Failed to parse Gemini API response");
-    }
-
-    // Extract text from response
-    if (
-      typeof responseData === "object" &&
-      responseData !== null &&
-      "candidates" in responseData
-    ) {
-      const candidates = responseData.candidates;
-      if (Array.isArray(candidates) && candidates.length > 0) {
-        const candidate = candidates[0];
-        if (
-          typeof candidate === "object" &&
-          candidate !== null &&
-          "content" in candidate
-        ) {
-          const content = candidate.content;
-          if (
-            typeof content === "object" &&
-            content !== null &&
-            "parts" in content
-          ) {
-            const parts = content.parts;
-            if (Array.isArray(parts) && parts.length > 0) {
-              const part = parts[0];
-              if (typeof part === "object" && part !== null && "text" in part) {
-                const text = part.text;
-                if (typeof text === "string") {
-                  return text;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    throw new Error("Unable to extract text from Gemini API response");
+  const apiKey = this.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY environment variable is not set");
   }
+
+  const contents = history.map((msg) => ({
+    role: msg.role === "assistant" ? "model" : "user",
+    parts: [{ text: msg.content }],
+  }));
+
+  const model = "models/gemini-2.0-flash-lite";
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: INTERVIEW_COACH_CONTEXT }],
+        },
+        contents,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+
+  const text =
+    data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (typeof text !== "string") {
+    throw new Error("Invalid Gemini response format");
+  }
+
+  return text;
+}
+
 }
