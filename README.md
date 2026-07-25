@@ -1,179 +1,148 @@
 # AI Interview Coach
 
-An AI-powered interview coaching platform built with Cloudflare Workers, featuring real-time chat interactions and persistent conversation history using Durable Objects.
+A serverless, Gemini-powered interview practice platform that runs entirely on Cloudflare's edge. Practice technical and behavioral interviews with an AI coach that **remembers the conversation across sessions**, **progressively adjusts difficulty**, and **tracks action items** between chats.
 
-## Overview
+> Live: [ai-interview-coach.<your-subdomain>.workers.dev](https://ai-interview-coach.<your-subdomain>.workers.dev) · API docs at `/docs` (OpenAPI 3.1 / Swagger UI)
 
-AI Interview Coach provides an interactive chat interface where users can practice interview scenarios with an AI coach. The application maintains conversation context across sessions, allowing for meaningful and continuous interview preparation experiences.
+---
 
-## Features
+## What it does
 
-- **Real-time AI Chat**: Interactive conversation with an AI interview coach
-- **Session Persistence**: Maintains conversation history across multiple interactions using Cloudflare Durable Objects
-- **RESTful API**: OpenAPI 3.1 compliant endpoints with automatic documentation
-- **Static Frontend**: Serves a web interface for easy interaction
-- **Scalable Architecture**: Built on Cloudflare's edge network for global performance
+- **Conversational interview practice** — talk to a coach that asks questions, then gives feedback on technical accuracy, communication, and structure.
+- **Session memory** — your conversation history persists per session via a Cloudflare Durable Object, so the coach remembers prior answers and tracks strengths/weaknesses across visits.
+- **Progressive difficulty** — starts easier and ramps up based on how you answer (see the system prompt in `src/context.ts`).
+- **Task tracking** — every session has a CRUD task list (`/api/tasks`) for action items, follow-ups, and prep work the coach assigns.
+- **Auto-generated OpenAPI 3.1 docs** at `/docs` via Chanfana + Zod schemas — try the API in-browser.
 
-## Tech Stack
+## Architecture
 
-- **Runtime**: Cloudflare Workers
-- **API Framework**: [Hono](https://hono.dev/) - Fast, lightweight web framework
-- **API Documentation**: [Chanfana](https://github.com/cloudflare/chanfana) - OpenAPI 3.1 schema generation and validation
-- **Validation**: Zod - TypeScript-first schema validation
-- **State Management**: Cloudflare Durable Objects - Consistent, low-latency coordination
-- **Language**: TypeScript
-
-## Prerequisites
-
-- Node.js (v18 or higher recommended)
-- A Cloudflare account
-- Wrangler CLI (installed via npm)
-
-## Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/agarwalaashrut/ai-interview-coach.git
-cd ai-interview-coach
+```
+                    ┌────────────────────────────┐
+   browser  ────►   │  Cloudflare Worker (Hono)  │  ◄── static frontend from /public
+                    │  /api/chat   /api/tasks/*  │
+                    └──────────┬─────────────────┘
+                               │  per-sessionId
+                               ▼
+                    ┌────────────────────────────┐
+                    │   ChatSession DO instance  │  ── stores full message history
+                    │   (Durable Object)         │     calls Gemini with system prompt
+                    └──────────┬─────────────────┘
+                               │  HTTPS
+                               ▼
+                       Google Gemini API
 ```
 
-2. Install dependencies:
-```bash
-npm install
+- **Cloudflare Workers** — runs the Hono app at the edge; no server to manage.
+- **Durable Objects (`ChatSession`)** — one per `sessionId`, owns the conversation history and Gemini calls so memory is consistent and low-latency.
+- **Chanfana + Zod** — request/response schemas double as runtime validation and OpenAPI docs.
+- **Workers Static Assets** — serves the frontend from `/public`.
+
+## Tech stack
+
+- **Runtime:** Cloudflare Workers (TypeScript, `wrangler` v4)
+- **API framework:** [Hono](https://hono.dev/) v4
+- **Validation + OpenAPI:** [Zod](https://zod.dev/) v3 + [Chanfana](https://github.com/cloudflare/chanfana) v2
+- **State:** Cloudflare Durable Objects
+- **LLM:** Google Gemini (key passed as the `GEMINI_API_KEY` Workers secret)
+- **Frontend:** vanilla HTML/CSS/JS — no build step
+
+## API
+
+All endpoints are documented at `/docs` once the dev server is running.
+
+### `POST /api/chat`
+
+Send a message to the coach and receive a response plus the full conversation history.
+
+**Request**
+```json
+{ "sessionId": "demo-1", "userInput": "Walk me through how a hash map handles collisions." }
 ```
 
-3. Login to Cloudflare:
-```bash
-npx wrangler login
-```
-
-## Development
-
-Start the local development server:
-
-```bash
-npm run dev
-# or
-npm start
-```
-
-The application will be available at `http://localhost:8787/`
-
-- **API Documentation**: Visit `http://localhost:8787/docs` to see the interactive Swagger UI
-- **Frontend**: The main interface is served from the root path
-
-## API Endpoints
-
-### POST `/api/chat`
-
-Send a message to the AI interview coach and receive a response.
-
-**Request Body:**
+**Response**
 ```json
 {
-  "sessionId": "string",
-  "userInput": "string"
-}
-```
-
-**Response:**
-```json
-{
-  "aiResponse": "string",
+  "aiResponse": "Solid opening. Before we go deeper — when you say 'open addressing'...",
   "history": [
-    {
-      "role": "user | assistant",
-      "content": "string"
-    }
+    { "role": "user",      "content": "Walk me through how a hash map handles collisions." },
+    { "role": "assistant", "content": "Solid opening. Before we go deeper — ..." }
   ]
 }
 ```
 
-**Parameters:**
-- `sessionId`: Unique identifier for the conversation session
-- `userInput`: The user's message or question
+### Tasks (`/api/tasks`)
 
-## Project Structure
+A per-session task list for action items the coach assigns. Full CRUD:
+
+- `POST   /api/tasks`       — create
+- `GET    /api/tasks`       — list
+- `GET    /api/tasks/:slug` — fetch one
+- `DELETE /api/tasks/:slug` — delete
+
+Task shape:
+```ts
+{
+  name: string;
+  slug: string;
+  description?: string;
+  completed: boolean;   // default false
+  due_date: string;     // ISO datetime
+}
+```
+
+## Project layout
 
 ```
 ai-interview-coach/
 ├── src/
-│   ├── index.ts              # Main application entry point
-│   ├── chatSession.ts        # Durable Object for session management
+│   ├── index.ts                 # Hono app + OpenAPI registry + static-asset fallback
+│   ├── chatSession.ts           # Durable Object: per-session memory + Gemini call
+│   ├── context.ts               # System prompt (coach role, behavior, feedback rules)
+│   ├── types.ts                 # Shared Zod schemas (Task, AppContext)
 │   └── endpoints/
-│       └── chat.ts           # Chat endpoint implementation
-├── public/                   # Static frontend assets
-├── .github/                  # GitHub configuration
-├── .vscode/                  # VS Code settings
-├── package.json              # Dependencies and scripts
-├── tsconfig.json            # TypeScript configuration
-├── wrangler.jsonc           # Cloudflare Workers configuration
-└── README.md
+│       ├── chat.ts              # POST /api/chat
+│       ├── taskCreate.ts
+│       ├── taskFetch.ts
+│       ├── taskList.ts
+│       └── taskDelete.ts
+├── public/                      # Static frontend (served by the Worker)
+├── frontend/                    # Local dev frontend
+├── wrangler.jsonc               # Worker config: Durable Object binding, assets, observability
+├── package.json
+└── tsconfig.json
 ```
 
-## Deployment
+## Local development
 
-Deploy to Cloudflare Workers:
+Prereqs: Node 18+, a Cloudflare account, and the Gemini API key.
+
+```bash
+git clone https://github.com/agarwalaashrut/ai-interview-coach.git
+cd ai-interview-coach
+
+npm install
+npx wrangler login
+
+# Set the Gemini key as a Workers secret
+npx wrangler secret put GEMINI_API_KEY
+
+npm run dev      # → http://localhost:8787
+                 #   /       frontend
+                 #   /docs   OpenAPI / Swagger UI
+```
+
+## Deploy
 
 ```bash
 npm run deploy
 ```
 
-After deployment, your application will be available at your Cloudflare Workers URL (e.g., `https://ai-interview-coach.<your-subdomain>.workers.dev`)
+You'll get a `https://ai-interview-coach.<your-subdomain>.workers.dev` URL. Don't forget to set the `GEMINI_API_KEY` secret in the deployed environment.
 
-## Configuration
+## Why I built it
 
-The application is configured via `wrangler.jsonc`:
-
-- **Durable Objects**: `CHAT_SESSION` binding for conversation state management
-- **Static Assets**: Serves files from the `./public/` directory
-- **Compatibility Date**: Set to `2026-01-03`
-
-## How It Works
-
-1. **Session Management**: Each conversation is identified by a unique `sessionId`
-2. **Durable Objects**: The `ChatSession` Durable Object maintains conversation history and state
-3. **Request Flow**:
-   - Client sends a POST request to `/api/chat` with `sessionId` and `userInput`
-   - The endpoint creates/retrieves a Durable Object instance for that session
-   - The Durable Object processes the message and maintains conversation context
-   - Response includes AI's reply and full conversation history
-
-## Development Tips
-
-- **Hot Reload**: Changes to files in `src/` automatically reload the development server
-- **API Testing**: Use the Swagger UI at `/docs` to test endpoints interactively
-- **TypeScript**: Enable strict type checking for better code quality
-- **OpenAPI Schema**: Automatically generated from code annotations
-
-## Environment Variables
-
-Currently, the project uses Cloudflare Workers bindings and doesn't require traditional environment variables. Sensitive data should be stored as [Cloudflare Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/).
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Interview prep usually means: a friend who has free time, a paid coach, or talking to yourself. The first two don't scale, the third doesn't push back. This is a self-contained alternative — the system prompt makes the model act like a coach (asks one question at a time, escalates difficulty, gives specific feedback), and the Durable Object gives it the memory to actually track progress over multiple sessions instead of resetting every page load.
 
 ## License
 
-This project is available under the [MIT License](LICENSE).
-
-## Resources
-
-- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
-- [Durable Objects Documentation](https://developers.cloudflare.com/durable-objects/)
-- [Hono Framework](https://hono.dev/)
-- [Chanfana Documentation](https://chanfana.pages.dev/)
-- [OpenAPI 3.1 Specification](https://swagger.io/specification/)
-
-## Support
-
-For issues, questions, or contributions, please [open an issue](https://github.com/agarwalaashrut/ai-interview-coach/issues) on GitHub.
-
----
-
-Built with ❤️ using Cloudflare Workers
+MIT
